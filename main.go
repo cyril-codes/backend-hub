@@ -1,10 +1,7 @@
 package main
 
-import (
-	"log"
-)
-
 func main() {
+	s := NewServer(":3000")
 
-	log.Println("Server running")
+	s.Run()
 }

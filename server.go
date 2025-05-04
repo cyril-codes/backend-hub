@@ -4,20 +4,25 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	_ "modernc.org/sqlite"
 )
 
 type Server struct {
 	listenAddr string
+	store      AuthStore
 }
 
-func NewServer(addr string) *Server {
+func NewServer(addr string, store AuthStore) *Server {
 	return &Server{
 		listenAddr: addr,
+		store:      store,
 	}
 }
 
 func (s *Server) Run() {
 	http.HandleFunc("POST /login", makeHttpHandler(s.handleLogin))
+	http.HandleFunc("POST /register", makeHttpHandler(s.handleRegister))
 
 	log.Println("Server starting on port", s.listenAddr)
 	if err := http.ListenAndServe(s.listenAddr, nil); err != nil {
@@ -26,12 +31,18 @@ func (s *Server) Run() {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
-
-	return WriteJSON(w, http.StatusOK, "Hello")
+	return nil
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error {
-	return nil
+	user := new(User)
+	err := json.NewDecoder(req.Body).Decode(user)
+
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	return WriteJSON(w, http.StatusOK, user)
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {

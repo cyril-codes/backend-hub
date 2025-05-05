@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"regexp"
 
 	_ "modernc.org/sqlite"
 )
+
+const emailRegexp = `[\w\d.\-_]{2,63}@[\w\d.-]+.\w{2,5}`
 
 type Server struct {
 	listenAddr string
@@ -31,17 +35,41 @@ func (s *Server) Run() {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
-	return nil
-}
+	user := new(LoginInput)
 
-func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error {
-	user := new(User)
 	err := json.NewDecoder(req.Body).Decode(user)
 
 	if err != nil {
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
+	err = s.store.Login(user)
+
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	return WriteJSON(w, http.StatusOK, "well done")
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error {
+	user := new(RegisterInput)
+
+	err := json.NewDecoder(req.Body).Decode(user)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	if err := verifyUser(user); err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	err = s.store.Register(user)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	// TODO: Do not return user and change status code
 	return WriteJSON(w, http.StatusOK, user)
 }
 
@@ -68,4 +96,24 @@ func WriteJSON(w http.ResponseWriter, status int, v any) error {
 	w.WriteHeader(status)
 
 	return json.NewEncoder(w).Encode(v)
+}
+
+func verifyUser(u *RegisterInput) error {
+	if len(u.Name) < 3 {
+		return errors.New("name is too short")
+	}
+
+	if pLength := len(u.Password); pLength < 12 || pLength > 64 {
+		return errors.New("invalid password length")
+	}
+
+	if len(u.Email) > 254 {
+		return errors.New("invalid email length")
+	}
+
+	if match, _ := regexp.MatchString(emailRegexp, u.Email); !match {
+		return errors.New("invalid email content")
+	}
+
+	return nil
 }

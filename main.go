@@ -8,6 +8,8 @@ func main() {
 		log.Fatal(err)
 	}
 
+	defer db.db.Close()
+
 	s := NewServer(":3000", db)
 	s.Run()
 }

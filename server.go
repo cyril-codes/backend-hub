@@ -1,27 +1,71 @@
 package main
 
 import (
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
+	"strconv"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
 const emailRegexp = `[\w\d.\-_]{2,63}@[\w\d.-]+.\w{2,5}`
 
+type jwtKeys struct {
+	private *rsa.PrivateKey
+	public  *rsa.PublicKey
+}
+
 type Server struct {
 	listenAddr string
 	store      AuthStore
+	jwt        jwtKeys
 }
 
-func NewServer(addr string, store AuthStore) *Server {
+type LoginResponse struct {
+	User        string `json:"user"`
+	AccessToken string `json:"accessToken"`
+}
+
+type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
+
+func NewServer(addr string, store AuthStore) (*Server, error) {
+	privateKey, err := os.ReadFile("jwt/jwtRS256.key")
+	if err != nil {
+		return nil, fmt.Errorf("could not open private key file\n %+v", err)
+	}
+
+	publicKey, err := os.ReadFile("jwt/jwtRS256.key.pub")
+	if err != nil {
+		return nil, fmt.Errorf("could not open public key file\n %+v", err)
+	}
+
+	priv, err := jwt.ParseRSAPrivateKeyFromPEM(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse private key\n %+v", err)
+	}
+
+	pub, err := jwt.ParseRSAPublicKeyFromPEM(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse public key\n %+v", err)
+	}
+
 	return &Server{
 		listenAddr: addr,
 		store:      store,
-	}
+		jwt: jwtKeys{
+			private: priv,
+			public:  pub,
+		},
+	}, nil
 }
 
 func (s *Server) Run() {
@@ -35,21 +79,42 @@ func (s *Server) Run() {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
-	user := new(LoginInput)
+	userInput := new(LoginInput)
 
-	err := json.NewDecoder(req.Body).Decode(user)
-
-	if err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
-	}
-
-	err = s.store.Login(user)
+	err := json.NewDecoder(req.Body).Decode(userInput)
 
 	if err != nil {
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
-	return WriteJSON(w, http.StatusOK, "well done")
+	user, err := s.store.Login(userInput)
+
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	issuedAt := time.Now()
+
+	accessToken, err := s.makeAccessToken(user.ID, issuedAt)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	refreshToken, err := s.makeAndStoreRefreshToken(user.ID, issuedAt)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	fmt.Println(refreshToken)
+
+	// set Cookies with refresh token
+
+	response := LoginResponse{
+		User:        user.Name,
+		AccessToken: accessToken,
+	}
+
+	return WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error {
@@ -69,8 +134,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error 
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
-	// TODO: Do not return user and change status code
-	return WriteJSON(w, http.StatusOK, user)
+	return WriteJSON(w, http.StatusCreated, nil)
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
@@ -80,8 +144,6 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
 	return nil
 }
-
-type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
 
 func makeHttpHandler(f HttpHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +158,40 @@ func WriteJSON(w http.ResponseWriter, status int, v any) error {
 	w.WriteHeader(status)
 
 	return json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) makeAccessToken(id int, issuedAt time.Time) (string, error) {
+	expiry := issuedAt.Add(time.Minute * 30)
+
+	claims := &jwt.RegisteredClaims{
+		Subject:   strconv.Itoa(id),
+		IssuedAt:  jwt.NewNumericDate(issuedAt),
+		ExpiresAt: jwt.NewNumericDate(expiry),
+	}
+
+	t := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+
+	return t.SignedString(s.jwt.private)
+}
+
+func (s *Server) makeAndStoreRefreshToken(id int, issuedAt time.Time) (string, error) {
+	sessionId := uuid.NewString()
+	expiry := issuedAt.Add(time.Hour * 72)
+
+	claims := &jwt.RegisteredClaims{
+		Subject:   strconv.Itoa(id),
+		IssuedAt:  jwt.NewNumericDate(issuedAt),
+		ExpiresAt: jwt.NewNumericDate(expiry),
+		ID:        sessionId,
+	}
+
+	t := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+
+	if err := s.store.AddSession(sessionId, id, issuedAt, expiry); err != nil {
+		return "", err
+	}
+
+	return t.SignedString(s.jwt.private)
 }
 
 func verifyUser(u *RegisterInput) error {

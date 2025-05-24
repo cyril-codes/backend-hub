@@ -3,13 +3,16 @@ package main
 import "log"
 
 func main() {
-	db, err := InitDB()
+	store, err := InitStore()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	defer db.db.Close()
+	defer store.db.Close()
 
-	s := NewServer(":3000", db)
+	s, err := NewServer(":3000", store)
+	if err != nil {
+		log.Fatal(err)
+	}
 	s.Run()
 }

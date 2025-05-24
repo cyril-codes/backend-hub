@@ -9,18 +9,20 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
 
 type AuthStore interface {
-	Login(*LoginInput) error
+	Login(*LoginInput) (*User, error)
 	Register(*RegisterInput) error
 	Refresh() error
 	Logout() error
+	AddSession(string, int, time.Time, time.Time) error
 }
 
-type SqliteDB struct {
+type Store struct {
 	db *sql.DB
 }
 
@@ -33,64 +35,78 @@ type hashParams struct {
 }
 
 const (
-	createTableQuery = `CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+	createUserTableQuery = `CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
 	email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );`
-	registerUserQuery = `INSERT INTO users(name, email, password_hash) VALUES(?, ?, ?)`
-	findUserQuery     = `SELECT * FROM users WHERE email = ?`
-	findAllUsersQuery = `SELECT * FROM users`
+	createSessionsTableQuery = `CREATE TABLE IF NOT EXISTS sessions (
+	id TEXT NOT NULL UNIQUE,
+	user_id INTEGER NOT NULL,
+	issued_at TIMESTAMP NOT NULL,
+	expires_at TIMESTAMP NOT NULL,
+	revoked_at TIMESTAMP
+);`
+	registerUserQuery  = `INSERT INTO users(name, email, password_hash) VALUES(?, ?, ?)`
+	findUserQuery      = `SELECT * FROM users WHERE email = ?`
+	findAllUsersQuery  = `SELECT * FROM users`
+	addNewSessionQuery = `INSERT INTO sessions(id, user_id, issued_at, expires_at) VALUES (?, ?, ?, ?);`
 )
 
-func InitDB() (*SqliteDB, error) {
-	db, err := sql.Open("sqlite", "db/users.db")
+func InitStore() (*Store, error) {
+	db, err := sql.Open("sqlite", "db/auth.db")
 
 	if err != nil {
 		return nil, fmt.Errorf("could not open connection to users db\n %+v", err)
 	}
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("could not connect to dbs\n %+v", err)
+		return nil, fmt.Errorf("could not connect to db\n %+v", err)
 	}
 
-	_, err = db.Exec(createTableQuery)
+	_, err = db.Exec(createUserTableQuery)
 
 	if err != nil {
-		return nil, fmt.Errorf("could not execute query\n %+v", err)
+		return nil, fmt.Errorf("could not execute user table query\n %+v", err)
 	}
 
-	log.Println("Connected to DB with table users")
+	_, err = db.Exec(createSessionsTableQuery)
 
-	return &SqliteDB{
+	if err != nil {
+		return nil, fmt.Errorf("could not execute session table query\n %+v", err)
+	}
+
+	log.Println("Connected to DB with table users and sessions")
+
+	return &Store{
 		db: db,
 	}, nil
 }
 
-func (store *SqliteDB) Login(login *LoginInput) error {
+func (store *Store) Login(login *LoginInput) (*User, error) {
 	u, err := getOneUser(store, login.Email)
 
 	if err == sql.ErrNoRows {
-		return errors.New("user does not exist")
+		return nil, errors.New("user does not exist")
 	}
 
 	p, salt, hash, err := decodeHash(u.PasswordHash)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	otherHash := argon2.IDKey([]byte(login.Password), salt, p.iterations, p.memory, p.parallelism, p.keyLength)
 
 	if subtle.ConstantTimeCompare(hash, otherHash) == 0 {
-		return errors.New("invalid password")
+		return nil, errors.New("invalid password")
 	}
 
-	return nil
+	return u, nil
 }
 
-func (store *SqliteDB) Register(user *RegisterInput) error {
+func (store *Store) Register(user *RegisterInput) error {
 	err := validateUniqueUser(store, user.Email)
 	if err != nil {
 		return err
@@ -111,11 +127,20 @@ func (store *SqliteDB) Register(user *RegisterInput) error {
 	return nil
 }
 
-func (store *SqliteDB) Refresh() error {
+func (store *Store) Refresh() error {
 	return nil
 }
 
-func (store *SqliteDB) Logout() error {
+func (store *Store) Logout() error {
+	return nil
+}
+
+func (store *Store) AddSession(sessionID string, userID int, issuedAt, expiresAt time.Time) error {
+	_, err := store.db.Exec(addNewSessionQuery, sessionID, userID, issuedAt, expiresAt)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -129,7 +154,7 @@ func defaultHashParams() *hashParams {
 	}
 }
 
-func validateUniqueUser(store *SqliteDB, email string) error {
+func validateUniqueUser(store *Store, email string) error {
 	u, err := getOneUser(store, email)
 
 	if err == nil && u.Email == email {
@@ -143,7 +168,7 @@ func validateUniqueUser(store *SqliteDB, email string) error {
 	return nil
 }
 
-func getOneUser(store *SqliteDB, email string) (*User, error) {
+func getOneUser(store *Store, email string) (*User, error) {
 	row := store.db.QueryRow(findUserQuery, email)
 
 	u := &User{}
@@ -179,8 +204,6 @@ func generateHashFromPwd(params *hashParams, password string) (string, error) {
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 
 	encodedHash := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, params.memory, params.iterations, params.parallelism, b64Salt, b64Pwd)
-
-	fmt.Println(encodedHash)
 
 	return encodedHash, nil
 }

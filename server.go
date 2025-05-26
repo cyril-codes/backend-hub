@@ -71,6 +71,7 @@ func NewServer(addr string, store AuthStore) (*Server, error) {
 func (s *Server) Run() {
 	http.HandleFunc("POST /login", makeHttpHandler(s.handleLogin))
 	http.HandleFunc("POST /register", makeHttpHandler(s.handleRegister))
+	http.HandleFunc("POST /refresh", makeHttpHandler(s.handleRefresh))
 
 	log.Println("Server starting on port", s.listenAddr)
 	if err := http.ListenAndServe(s.listenAddr, nil); err != nil {
@@ -105,9 +106,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
-	fmt.Println(refreshToken)
+	cookie := http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Path:     "/refresh",
+		HttpOnly: true,
+		Secure:   true,
+		Expires:  issuedAt.Add(time.Hour * 72),
+		MaxAge:   60 * 60 * 72,
+		SameSite: http.SameSiteStrictMode,
+	}
 
-	// set Cookies with refresh token
+	http.SetCookie(w, &cookie)
 
 	response := LoginResponse{
 		User:        user.Name,
@@ -138,6 +148,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error 
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
+	fmt.Println(req.Cookie("refresh_token"))
 	return nil
 }
 

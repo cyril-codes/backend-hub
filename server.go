@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -35,7 +34,22 @@ type LoginResponse struct {
 	AccessToken string `json:"accessToken"`
 }
 
+type RefreshResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
 type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
+
+var emptyCookie = &http.Cookie{
+	Name:     "refresh_token",
+	Value:    "",
+	Path:     "/refresh",
+	HttpOnly: true,
+	Secure:   true,
+	Expires:  time.Unix(0, 0),
+	MaxAge:   0,
+	SameSite: http.SameSiteStrictMode,
+}
 
 func NewServer(addr string, store AuthStore) (*Server, error) {
 	privateKey, err := os.ReadFile("jwt/jwtRS256.key")
@@ -48,12 +62,12 @@ func NewServer(addr string, store AuthStore) (*Server, error) {
 		return nil, fmt.Errorf("could not open public key file\n %+v", err)
 	}
 
-	priv, err := jwt.ParseRSAPrivateKeyFromPEM(privateKey)
+	private, err := jwt.ParseRSAPrivateKeyFromPEM(privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse private key\n %+v", err)
 	}
 
-	pub, err := jwt.ParseRSAPublicKeyFromPEM(publicKey)
+	public, err := jwt.ParseRSAPublicKeyFromPEM(publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse public key\n %+v", err)
 	}
@@ -62,8 +76,8 @@ func NewServer(addr string, store AuthStore) (*Server, error) {
 		listenAddr: addr,
 		store:      store,
 		jwt: jwtKeys{
-			private: priv,
-			public:  pub,
+			private: private,
+			public:  public,
 		},
 	}, nil
 }
@@ -148,8 +162,94 @@ func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error 
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
-	fmt.Println(req.Cookie("refresh_token"))
-	return nil
+	cookie, err := req.Cookie("refresh_token")
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	token, err := jwt.ParseWithClaims(cookie.Value, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return s.jwt.public, nil
+	})
+
+	if token == nil || !token.Valid {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "invalid token")
+	}
+
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	claims, ok := token.Claims.(*jwt.RegisteredClaims)
+	if !ok {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "cannot extract claims from token")
+	}
+
+	now := time.Now().Add(time.Second * 30)
+
+	if now.Compare(claims.IssuedAt.Time) != 1 {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "token issued in the future")
+	}
+
+	if now.Compare(claims.ExpiresAt.Time) != -1 {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "token expired")
+	}
+
+	session, err := s.store.FindSession(claims.ID)
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "cannot find session")
+	}
+
+	if session.revokedAt != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "session has been revoked")
+	}
+
+	if session.userID != claims.Subject {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "incorrect user")
+	}
+
+	err = s.store.RevokeSession(session.ID)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	iat := time.Now()
+	accessToken, err := s.makeAccessToken(claims.Subject, iat)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, "cannot issue access token")
+	}
+
+	refreshToken, err := s.makeAndStoreRefreshToken(claims.Subject, iat)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, "cannot issue refresh token")
+	}
+
+	newCookie := http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Path:     "/refresh",
+		HttpOnly: true,
+		Secure:   true,
+		Expires:  iat.Add(time.Hour * 72),
+		MaxAge:   60 * 60 * 72,
+		SameSite: http.SameSiteStrictMode,
+	}
+
+	http.SetCookie(w, &newCookie)
+
+	response := RefreshResponse{
+		AccessToken: accessToken,
+	}
+
+	return WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
@@ -171,11 +271,11 @@ func WriteJSON(w http.ResponseWriter, status int, v any) error {
 	return json.NewEncoder(w).Encode(v)
 }
 
-func (s *Server) makeAccessToken(id int, issuedAt time.Time) (string, error) {
+func (s *Server) makeAccessToken(id string, issuedAt time.Time) (string, error) {
 	expiry := issuedAt.Add(time.Minute * 30)
 
 	claims := &jwt.RegisteredClaims{
-		Subject:   strconv.Itoa(id),
+		Subject:   id,
 		IssuedAt:  jwt.NewNumericDate(issuedAt),
 		ExpiresAt: jwt.NewNumericDate(expiry),
 	}
@@ -185,12 +285,13 @@ func (s *Server) makeAccessToken(id int, issuedAt time.Time) (string, error) {
 	return t.SignedString(s.jwt.private)
 }
 
-func (s *Server) makeAndStoreRefreshToken(id int, issuedAt time.Time) (string, error) {
+// TODO: Split make and store logic
+func (s *Server) makeAndStoreRefreshToken(id string, issuedAt time.Time) (string, error) {
 	sessionId := uuid.NewString()
 	expiry := issuedAt.Add(time.Hour * 72)
 
 	claims := &jwt.RegisteredClaims{
-		Subject:   strconv.Itoa(id),
+		Subject:   id,
 		IssuedAt:  jwt.NewNumericDate(issuedAt),
 		ExpiresAt: jwt.NewNumericDate(expiry),
 		ID:        sessionId,

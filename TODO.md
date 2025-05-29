@@ -1,0 +1,2 @@
+- Set correct status code responses for errors with correct messages
+- Split correctly between store/db/auth/routes

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -19,7 +20,9 @@ type AuthStore interface {
 	Register(*RegisterInput) error
 	Refresh() error
 	Logout() error
-	AddSession(string, int, time.Time, time.Time) error
+	AddSession(string, string, time.Time, time.Time) error
+	FindSession(string) (*Session, error)
+	RevokeSession(string) error
 }
 
 type Store struct {
@@ -34,27 +37,6 @@ type hashParams struct {
 	keyLength   uint32
 }
 
-const (
-	createUserTableQuery = `CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-	email TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);`
-	createSessionsTableQuery = `CREATE TABLE IF NOT EXISTS sessions (
-	id TEXT NOT NULL UNIQUE,
-	user_id INTEGER NOT NULL,
-	issued_at TIMESTAMP NOT NULL,
-	expires_at TIMESTAMP NOT NULL,
-	revoked_at TIMESTAMP
-);`
-	registerUserQuery  = `INSERT INTO users(name, email, password_hash) VALUES(?, ?, ?)`
-	findUserQuery      = `SELECT * FROM users WHERE email = ?`
-	findAllUsersQuery  = `SELECT * FROM users`
-	addNewSessionQuery = `INSERT INTO sessions(id, user_id, issued_at, expires_at) VALUES (?, ?, ?, ?);`
-)
-
 func InitStore() (*Store, error) {
 	db, err := sql.Open("sqlite", "db/auth.db")
 
@@ -66,16 +48,14 @@ func InitStore() (*Store, error) {
 		return nil, fmt.Errorf("could not connect to db\n %+v", err)
 	}
 
-	_, err = db.Exec(createUserTableQuery)
-
+	err = createTable(db, createUserTableQuery)
 	if err != nil {
-		return nil, fmt.Errorf("could not execute user table query\n %+v", err)
+		return nil, err
 	}
 
-	_, err = db.Exec(createSessionsTableQuery)
-
+	err = createTable(db, createSessionsTableQuery)
 	if err != nil {
-		return nil, fmt.Errorf("could not execute session table query\n %+v", err)
+		return nil, err
 	}
 
 	log.Println("Connected to DB with table users and sessions")
@@ -119,7 +99,8 @@ func (store *Store) Register(user *RegisterInput) error {
 		return err
 	}
 
-	_, err = store.db.Exec(registerUserQuery, user.Name, user.Email, encodedHash)
+	id := uuid.NewString()
+	_, err = store.db.Exec(registerUserQuery, id, user.Name, user.Email, encodedHash)
 	if err != nil {
 		return err
 	}
@@ -132,15 +113,6 @@ func (store *Store) Refresh() error {
 }
 
 func (store *Store) Logout() error {
-	return nil
-}
-
-func (store *Store) AddSession(sessionID string, userID int, issuedAt, expiresAt time.Time) error {
-	_, err := store.db.Exec(addNewSessionQuery, sessionID, userID, issuedAt, expiresAt)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -166,19 +138,6 @@ func validateUniqueUser(store *Store, email string) error {
 	}
 
 	return nil
-}
-
-func getOneUser(store *Store, email string) (*User, error) {
-	row := store.db.QueryRow(findUserQuery, email)
-
-	u := &User{}
-	err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.CreatedAt)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return u, nil
 }
 
 func generateSalt(length uint32) ([]byte, error) {

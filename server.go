@@ -43,7 +43,7 @@ type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
 var emptyCookie = &http.Cookie{
 	Name:     "refresh_token",
 	Value:    "",
-	Path:     "/refresh",
+	Path:     "/",
 	HttpOnly: true,
 	Secure:   true,
 	Expires:  time.Unix(0, 0),
@@ -86,6 +86,7 @@ func (s *Server) Run() {
 	http.HandleFunc("POST /login", makeHttpHandler(s.handleLogin))
 	http.HandleFunc("POST /register", makeHttpHandler(s.handleRegister))
 	http.HandleFunc("POST /refresh", makeHttpHandler(s.handleRefresh))
+	http.HandleFunc("POST /logout", makeHttpHandler(s.handleLogout))
 
 	log.Println("Server starting on port", s.listenAddr)
 	if err := http.ListenAndServe(s.listenAddr, nil); err != nil {
@@ -123,7 +124,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 	cookie := http.Cookie{
 		Name:     "refresh_token",
 		Value:    refreshToken,
-		Path:     "/refresh",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		Expires:  issuedAt.Add(time.Hour * 72),
@@ -235,7 +236,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 	newCookie := http.Cookie{
 		Name:     "refresh_token",
 		Value:    refreshToken,
-		Path:     "/refresh",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		Expires:  iat.Add(time.Hour * 72),
@@ -253,7 +254,67 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
-	return nil
+	cookie, err := req.Cookie("refresh_token")
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	token, err := jwt.ParseWithClaims(cookie.Value, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return s.jwt.public, nil
+	})
+
+	if token == nil || !token.Valid {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "invalid token")
+	}
+
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	claims, ok := token.Claims.(*jwt.RegisteredClaims)
+	if !ok {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "cannot extract claims from token")
+	}
+
+	now := time.Now().Add(time.Second * 30)
+
+	if now.Compare(claims.IssuedAt.Time) != 1 {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "token issued in the future")
+	}
+
+	if now.Compare(claims.ExpiresAt.Time) != -1 {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "token expired")
+	}
+
+	session, err := s.store.FindSession(claims.ID)
+	if err != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "cannot find session")
+	}
+
+	if session.revokedAt != nil {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "session has been revoked")
+	}
+
+	if session.userID != claims.Subject {
+		http.SetCookie(w, emptyCookie)
+		return WriteJSON(w, http.StatusBadRequest, "incorrect user")
+	}
+
+	err = s.store.RevokeSession(session.ID)
+	if err != nil {
+		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	}
+
+	http.SetCookie(w, emptyCookie)
+	return WriteJSON(w, http.StatusNoContent, nil)
 }
 
 func makeHttpHandler(f HttpHandlerFunc) http.HandlerFunc {
@@ -267,6 +328,10 @@ func makeHttpHandler(f HttpHandlerFunc) http.HandlerFunc {
 func WriteJSON(w http.ResponseWriter, status int, v any) error {
 	w.Header().Add("Content-Type", "application/json")
 	w.WriteHeader(status)
+
+	if status == http.StatusNoContent {
+		return nil
+	}
 
 	return json.NewEncoder(w).Encode(v)
 }

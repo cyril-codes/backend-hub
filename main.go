@@ -3,7 +3,7 @@ package main
 import "log"
 
 func main() {
-	store, err := InitStore()
+	store, err := NewStore()
 	if err != nil {
 		log.Fatal(err)
 	}

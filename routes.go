@@ -6,10 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cyril-codes/backend-hub/auth"
 	_ "modernc.org/sqlite"
 )
-
-const emailRegexp = `[\w\d.\-_]{2,63}@[\w\d.-]+.\w{2,5}`
 
 var emptyCookie = &http.Cookie{
 	Name:     "refresh_token",
@@ -22,7 +21,12 @@ var emptyCookie = &http.Cookie{
 	SameSite: http.SameSiteStrictMode,
 }
 
-func NewServer(addr string, store AuthStore) (*Server, error) {
+type Server struct {
+	listenAddr string
+	store      auth.AuthService
+}
+
+func NewServer(addr string, store auth.AuthService) (*Server, error) {
 	return &Server{
 		listenAddr: addr,
 		store:      store,
@@ -42,7 +46,7 @@ func (s *Server) Run() {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
-	userInput := new(LoginInput)
+	userInput := new(auth.LoginInput)
 
 	err := json.NewDecoder(req.Body).Decode(userInput)
 
@@ -57,7 +61,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 
 	http.SetCookie(w, meta.Cookie)
 
-	response := LoginResponse{
+	response := auth.LoginResponse{
 		User:        meta.Name,
 		AccessToken: meta.AccessToken,
 	}
@@ -65,7 +69,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error {
-	user := new(RegisterInput)
+	user := new(auth.RegisterInput)
 
 	err := json.NewDecoder(req.Body).Decode(user)
 	if err != nil {
@@ -94,7 +98,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 	}
 
 	http.SetCookie(w, meta.Cookie)
-	response := RefreshResponse{
+	response := auth.RefreshResponse{
 		AccessToken: meta.AccessToken,
 	}
 
@@ -115,6 +119,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
 
 	return WriteJSON(w, http.StatusNoContent, nil)
 }
+
+type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error
 
 func makeHttpHandler(f HttpHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

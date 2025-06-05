@@ -1,14 +1,18 @@
 package main
 
-import "log"
+import (
+	"log"
+
+	"github.com/cyril-codes/backend-hub/auth"
+)
 
 func main() {
-	store, err := NewStore()
+	store, err := auth.NewStore()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	defer store.db.Close()
+	defer store.DB.Close()
 
 	s, err := NewServer(":3000", store)
 	if err != nil {

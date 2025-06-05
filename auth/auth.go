@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/rand"
@@ -44,6 +44,8 @@ var (
 	ErrInvalidEmail             = errors.New("invalid email")
 )
 
+const emailRegexp = `[\w\d.\-_]{2,63}@[\w\d.-]+.\w{2,5}`
+
 func NewStore() (*Store, error) {
 	db, err := sql.Open("sqlite", "db/auth.db")
 
@@ -76,7 +78,7 @@ func NewStore() (*Store, error) {
 	}
 
 	store := &Store{
-		db: db,
+		DB: db,
 		jwt: jwtKeys{
 			private: private,
 			public:  public,

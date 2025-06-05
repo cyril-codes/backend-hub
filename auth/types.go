@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/rsa"
@@ -6,6 +6,13 @@ import (
 	"net/http"
 	"time"
 )
+
+type AuthService interface {
+	Login(*LoginInput) (*LoginMeta, error)
+	Register(*RegisterInput) error
+	Refresh(*http.Cookie) (*RefreshMeta, error)
+	Logout(*http.Cookie) error
+}
 
 type User struct {
 	ID           string    `json:"id"`
@@ -45,15 +52,8 @@ type Session struct {
 	revokedAt *time.Time `db:"revoked_at"`
 }
 
-type AuthStore interface {
-	Login(*LoginInput) (*LoginMeta, error)
-	Register(*RegisterInput) error
-	Refresh(*http.Cookie) (*RefreshMeta, error)
-	Logout(*http.Cookie) error
-}
-
 type Store struct {
-	db  *sql.DB
+	DB  *sql.DB
 	jwt jwtKeys
 }
 
@@ -70,11 +70,6 @@ type jwtKeys struct {
 	public  *rsa.PublicKey
 }
 
-type Server struct {
-	listenAddr string
-	store      AuthStore
-}
-
 type LoginResponse struct {
 	User        string `json:"user"`
 	AccessToken string `json:"accessToken"`
@@ -83,5 +78,3 @@ type LoginResponse struct {
 type RefreshResponse struct {
 	AccessToken string `json:"accessToken"`
 }
-
-type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error

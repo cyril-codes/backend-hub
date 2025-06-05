@@ -21,6 +21,12 @@ var emptyCookie = &http.Cookie{
 	SameSite: http.SameSiteStrictMode,
 }
 
+const (
+	invalidInput  = "invalid input"
+	invalidToken  = "invalid or expired token"
+	refreshCookie = "refresh_token"
+)
+
 type Server struct {
 	listenAddr string
 	store      auth.AuthService
@@ -49,18 +55,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 	userInput := new(auth.LoginInput)
 
 	err := json.NewDecoder(req.Body).Decode(userInput)
-
 	if err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+		return WriteJSON(w, http.StatusBadRequest, invalidInput)
 	}
 
-	meta, err := s.store.Login(userInput)
-	if err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	meta, httpErr := s.store.Login(userInput)
+	if httpErr != nil {
+		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
 
 	http.SetCookie(w, meta.Cookie)
-
 	response := auth.LoginResponse{
 		User:        meta.Name,
 		AccessToken: meta.AccessToken,
@@ -76,25 +80,25 @@ func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error 
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
-	err = s.store.Register(user)
-	if err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	httpErr := s.store.Register(user)
+	if httpErr != nil {
+		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
 
 	return WriteJSON(w, http.StatusCreated, nil)
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
-	cookie, err := req.Cookie("refresh_token")
+	cookie, err := req.Cookie(refreshCookie)
 	if err != nil {
 		http.SetCookie(w, emptyCookie)
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+		return WriteJSON(w, http.StatusUnauthorized, invalidToken)
 	}
 
-	meta, err := s.store.Refresh(cookie)
-	if err != nil {
+	meta, httpErr := s.store.Refresh(cookie)
+	if httpErr != nil {
 		http.SetCookie(w, emptyCookie)
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
 
 	http.SetCookie(w, meta.Cookie)
@@ -106,15 +110,16 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
-	cookie, err := req.Cookie("refresh_token")
+	cookie, err := req.Cookie(refreshCookie)
 	http.SetCookie(w, emptyCookie)
 
 	if err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+
+		return WriteJSON(w, http.StatusUnauthorized, invalidToken)
 	}
 
-	if err := s.store.Logout(cookie); err != nil {
-		return WriteJSON(w, http.StatusBadRequest, err.Error())
+	if httpErr := s.store.Logout(cookie); httpErr != nil {
+		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
 
 	return WriteJSON(w, http.StatusNoContent, nil)

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	httperror "github.com/cyril-codes/backend-hub/httpError"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
@@ -29,19 +30,17 @@ var (
 	}
 	ErrDBConnectionFailure      = errors.New("could not connect to db")
 	ErrJWTKeyFailure            = errors.New("could not find or parse key")
-	ErrUserDoesNotExist         = errors.New("user does not exist")
 	ErrInvalidPassword          = errors.New("invalid password")
-	ErrInvalidToken             = errors.New("invalid token")
-	ErrExpiredToken             = errors.New("token is expired")
-	ErrInvalidSession           = errors.New("invalid session")
-	ErrInvalidUser              = errors.New("invalid user")
-	ErrTokenIssue               = errors.New("cannot issue token")
 	ErrExistingUser             = errors.New("user already registered")
-	ErrInternalValidation       = errors.New("could not verify input")
 	ErrInvalidHash              = errors.New("invalid hash")
 	ErrIncompatibleArgonVersion = errors.New("incompatible argon2 version")
 	ErrInvalidName              = errors.New("invalid name")
 	ErrInvalidEmail             = errors.New("invalid email")
+	ErrInvalidLogin             = errors.New("invalid email or password")
+	ErrInvalidToken             = errors.New("invalid or expired token")
+	ErrInternalLogin            = errors.New("an error occured while trying to login")
+	ErrInternalRegister         = errors.New("an error occured while trying to register")
+	ErrInternalRefresh          = errors.New("an error occured while trying to refresh tokens")
 )
 
 const emailRegexp = `[\w\d.\-_]{2,63}@[\w\d.-]+.\w{2,5}`
@@ -100,34 +99,34 @@ func NewStore() (*Store, error) {
 	return store, nil
 }
 
-func (store *Store) Login(login *LoginInput) (*LoginMeta, error) {
+func (store *Store) Login(login *LoginInput) (*LoginMeta, *httperror.HttpError) {
 	u, err := store.getOneUser(login.Email)
 
 	if err == sql.ErrNoRows {
-		return nil, ErrUserDoesNotExist
+		return nil, httperror.Unauthorized(ErrInvalidLogin)
 	}
 
 	p, salt, hash, err := decodeHash(u.PasswordHash)
 	if err != nil {
-		return nil, err
+		return nil, httperror.InternalError(ErrInternalLogin)
 	}
 
 	otherHash := argon2.IDKey([]byte(login.Password), salt, p.iterations, p.memory, p.parallelism, p.keyLength)
 
 	if subtle.ConstantTimeCompare(hash, otherHash) == 0 {
-		return nil, ErrInvalidPassword
+		return nil, httperror.Unauthorized(ErrInvalidLogin)
 	}
 
 	iat := time.Now()
 
 	accessToken, err := store.newAccessToken(u.ID, iat)
 	if err != nil {
-		return nil, err
+		return nil, httperror.InternalError(ErrInternalLogin)
 	}
 
 	refreshToken, err := store.newRefreshToken(u.ID, iat)
 	if err != nil {
-		return nil, err
+		return nil, httperror.InternalError(ErrInternalLogin)
 	}
 
 	cookie := newRefreshCookie(refreshToken, iat.Add(time.Hour*72))
@@ -135,122 +134,126 @@ func (store *Store) Login(login *LoginInput) (*LoginMeta, error) {
 	return &LoginMeta{Name: u.Name, AccessToken: accessToken, Cookie: cookie}, nil
 }
 
-func (store *Store) Register(user *RegisterInput) error {
+func (store *Store) Register(user *RegisterInput) *httperror.HttpError {
 	if err := validateUserInput(user); err != nil {
-		return err
+		return httperror.BadRequest(err)
 	}
 
 	if err := store.validateUniqueUser(user.Email); err != nil {
-		return err
+		if errors.Is(err, ErrExistingUser) {
+			return httperror.Conflict(err)
+		}
+
+		return httperror.InternalError(ErrInternalRegister)
 	}
 
 	encodedHash, err := newHashedPassword(&defaultHashParams, user.Password)
 	if err != nil {
-		return err
+		return httperror.InternalError(ErrInternalRegister)
 	}
 
 	if err := store.registerUser(user.Name, user.Email, encodedHash); err != nil {
-		return err
+		return httperror.InternalError(ErrInternalRegister)
 	}
 
 	return nil
 }
 
-func (store *Store) Refresh(cookie *http.Cookie) (*RefreshMeta, error) {
+func (store *Store) Refresh(cookie *http.Cookie) (*RefreshMeta, *httperror.HttpError) {
 	token, err := jwt.ParseWithClaims(cookie.Value, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return store.jwt.public, nil
 	})
 
 	if err != nil || token == nil || !token.Valid {
-		return nil, ErrInvalidToken
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	claims, ok := token.Claims.(*jwt.RegisteredClaims)
 	if !ok {
-		return nil, ErrInvalidToken
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	iat := time.Now()
 	comp := iat.Add(time.Second * 30)
 
 	if comp.Compare(claims.IssuedAt.Time) != 1 {
-		return nil, ErrInvalidToken
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if comp.Compare(claims.ExpiresAt.Time) != -1 {
-		return nil, ErrExpiredToken
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	session, err := store.findSession(claims.ID)
 	if err != nil {
-		return nil, ErrInvalidSession
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if session.revokedAt != nil {
-		return nil, ErrInvalidSession
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if session.userID != claims.Subject {
-		return nil, ErrInvalidUser
+		return nil, httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if err := store.revokeSession(session.ID); err != nil {
-		return nil, err
+		return nil, httperror.InternalError(ErrInternalRefresh)
 	}
 
 	accessToken, err := store.newAccessToken(claims.Subject, iat)
 	if err != nil {
-		return nil, ErrTokenIssue
+		return nil, httperror.InternalError(ErrInternalRefresh)
 	}
 
 	refreshToken, err := store.newRefreshToken(claims.Subject, iat)
 	if err != nil {
-		return nil, ErrTokenIssue
+		return nil, httperror.InternalError(ErrInternalRefresh)
 	}
 
 	cookie = newRefreshCookie(refreshToken, iat.Add(time.Hour*72))
 	return &RefreshMeta{AccessToken: accessToken, Cookie: cookie}, nil
 }
 
-func (store *Store) Logout(cookie *http.Cookie) error {
+func (store *Store) Logout(cookie *http.Cookie) *httperror.HttpError {
 	token, err := jwt.ParseWithClaims(cookie.Value, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return store.jwt.public, nil
 	})
 
 	if token == nil || !token.Valid || err != nil {
-		return ErrInvalidToken
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	claims, ok := token.Claims.(*jwt.RegisteredClaims)
 	if !ok {
-		return ErrInvalidToken
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	now := time.Now().Add(time.Second * 30)
 
 	if now.Compare(claims.IssuedAt.Time) != 1 {
-		return ErrInvalidToken
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if now.Compare(claims.ExpiresAt.Time) != -1 {
-		return ErrExpiredToken
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	session, err := store.findSession(claims.ID)
 	if err != nil {
-		return ErrInvalidSession
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if session.revokedAt != nil {
-		return ErrInvalidSession
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if session.userID != claims.Subject {
-		return ErrInvalidUser
+		return httperror.Unauthorized(ErrInvalidToken)
 	}
 
 	if err := store.revokeSession(session.ID); err != nil {
-		return err
+		return httperror.InternalError(ErrInternalRefresh)
 	}
 
 	return nil
@@ -264,7 +267,7 @@ func (store *Store) validateUniqueUser(email string) error {
 	}
 
 	if err != nil && err != sql.ErrNoRows {
-		return ErrInternalValidation
+		return err
 	}
 
 	return nil

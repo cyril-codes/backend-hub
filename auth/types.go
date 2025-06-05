@@ -5,13 +5,15 @@ import (
 	"database/sql"
 	"net/http"
 	"time"
+
+	httperror "github.com/cyril-codes/backend-hub/httpError"
 )
 
 type AuthService interface {
-	Login(*LoginInput) (*LoginMeta, error)
-	Register(*RegisterInput) error
-	Refresh(*http.Cookie) (*RefreshMeta, error)
-	Logout(*http.Cookie) error
+	Login(*LoginInput) (*LoginMeta, *httperror.HttpError)
+	Register(*RegisterInput) *httperror.HttpError
+	Refresh(*http.Cookie) (*RefreshMeta, *httperror.HttpError)
+	Logout(*http.Cookie) *httperror.HttpError
 }
 
 type User struct {

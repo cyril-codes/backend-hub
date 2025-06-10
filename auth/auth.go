@@ -259,6 +259,41 @@ func (store *Store) Logout(cookie *http.Cookie) *httperror.HttpError {
 	return nil
 }
 
+func (store *Store) IsAuthorized(req *http.Request) bool {
+	header := req.Header.Get("Authorization")
+	if header == "" {
+		return false
+	}
+
+	accessToken, found := strings.CutPrefix(header, "Bearer ")
+	if !found {
+		return false
+	}
+
+	token, err := jwt.ParseWithClaims(accessToken, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return store.jwt.public, nil
+	})
+
+	if err != nil || token == nil || !token.Valid {
+		return false
+	}
+
+	claims, ok := token.Claims.(*jwt.RegisteredClaims)
+	if !ok {
+		return false
+	}
+
+	if err := uuid.Validate(claims.Subject); err != nil {
+		return false
+	}
+
+	if time.Now().Compare(claims.ExpiresAt.Time) != -1 {
+		return false
+	}
+
+	return true
+}
+
 func (store *Store) validateUniqueUser(email string) error {
 	u, err := store.getOneUser(email)
 

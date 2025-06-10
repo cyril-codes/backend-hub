@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -29,13 +30,13 @@ const (
 
 type Server struct {
 	listenAddr string
-	store      auth.AuthService
+	auth       auth.AuthService
 }
 
-func NewServer(addr string, store auth.AuthService) (*Server, error) {
+func NewServer(addr string, auth auth.AuthService) (*Server, error) {
 	return &Server{
 		listenAddr: addr,
-		store:      store,
+		auth:       auth,
 	}, nil
 }
 
@@ -44,6 +45,7 @@ func (s *Server) Run() {
 	http.HandleFunc("POST /register", makeHttpHandler(s.handleRegister))
 	http.HandleFunc("POST /refresh", makeHttpHandler(s.handleRefresh))
 	http.HandleFunc("POST /logout", makeHttpHandler(s.handleLogout))
+	http.HandleFunc("POST /feeds", makeHttpHandler(s.handleAddRSS))
 
 	log.Println("Server starting on port", s.listenAddr)
 	if err := http.ListenAndServe(s.listenAddr, nil); err != nil {
@@ -59,7 +61,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, req *http.Request) error {
 		return WriteJSON(w, http.StatusBadRequest, invalidInput)
 	}
 
-	meta, httpErr := s.store.Login(userInput)
+	meta, httpErr := s.auth.Login(userInput)
 	if httpErr != nil {
 		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
@@ -80,7 +82,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, req *http.Request) error 
 		return WriteJSON(w, http.StatusBadRequest, err.Error())
 	}
 
-	httpErr := s.store.Register(user)
+	httpErr := s.auth.Register(user)
 	if httpErr != nil {
 		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
@@ -95,7 +97,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, req *http.Request) error {
 		return WriteJSON(w, http.StatusUnauthorized, invalidToken)
 	}
 
-	meta, httpErr := s.store.Refresh(cookie)
+	meta, httpErr := s.auth.Refresh(cookie)
 	if httpErr != nil {
 		http.SetCookie(w, emptyCookie)
 		return WriteJSON(w, httpErr.Code, httpErr.Error())
@@ -118,11 +120,31 @@ func (s *Server) handleLogout(w http.ResponseWriter, req *http.Request) error {
 		return WriteJSON(w, http.StatusUnauthorized, invalidToken)
 	}
 
-	if httpErr := s.store.Logout(cookie); httpErr != nil {
+	if httpErr := s.auth.Logout(cookie); httpErr != nil {
 		return WriteJSON(w, httpErr.Code, httpErr.Error())
 	}
 
 	return WriteJSON(w, http.StatusNoContent, nil)
+}
+
+type Input struct {
+	Url string `json:"url"`
+}
+
+func (s *Server) handleAddRSS(w http.ResponseWriter, req *http.Request) error {
+	if isValid := s.auth.IsAuthorized(req); !isValid {
+		return WriteJSON(w, http.StatusUnauthorized, "invalid token")
+	}
+
+	var input Input
+	err := json.NewDecoder(req.Body).Decode(&input)
+	if err != nil {
+		return WriteJSON(w, http.StatusUnauthorized, "invalid token")
+	}
+
+	fmt.Println(input.Url)
+
+	return WriteJSON(w, http.StatusOK, "Nice")
 }
 
 type HttpHandlerFunc func(http.ResponseWriter, *http.Request) error

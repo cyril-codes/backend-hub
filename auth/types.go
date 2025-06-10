@@ -14,6 +14,7 @@ type AuthService interface {
 	Register(*RegisterInput) *httperror.HttpError
 	Refresh(*http.Cookie) (*RefreshMeta, *httperror.HttpError)
 	Logout(*http.Cookie) *httperror.HttpError
+	IsAuthorized(header *http.Request) bool
 }
 
 type User struct {

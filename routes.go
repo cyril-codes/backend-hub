@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/cyril-codes/backend-hub/auth"
+	"github.com/cyril-codes/backend-hub/rss"
 	_ "modernc.org/sqlite"
 )
 
@@ -31,12 +31,14 @@ const (
 type Server struct {
 	listenAddr string
 	auth       auth.AuthService
+	rss        rss.RssService
 }
 
-func NewServer(addr string, auth auth.AuthService) (*Server, error) {
+func NewServer(addr string, auth auth.AuthService, rss rss.RssService) (*Server, error) {
 	return &Server{
 		listenAddr: addr,
 		auth:       auth,
+		rss:        rss,
 	}, nil
 }
 
@@ -142,7 +144,9 @@ func (s *Server) handleAddRSS(w http.ResponseWriter, req *http.Request) error {
 		return WriteJSON(w, http.StatusUnauthorized, "invalid token")
 	}
 
-	fmt.Println(input.Url)
+	if err := s.rss.AddFeed(input.Url); err != nil {
+		return WriteJSON(w, http.StatusUnauthorized, "invalid url")
+	}
 
 	return WriteJSON(w, http.StatusOK, "Nice")
 }
